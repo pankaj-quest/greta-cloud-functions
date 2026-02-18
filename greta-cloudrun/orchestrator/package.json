@@ -1,0 +1,17 @@
+{
+  "name": "greta-orchestrator",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Cloud Run container orchestrator for Greta",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@google-cloud/run": "^1.1.0",
+    "@google-cloud/storage": "^7.7.0",
+    "express": "^4.18.2",
+    "cors": "^2.8.5"
+  }
+}
+

@@ -1,0 +1,36 @@
+# Google Cloud Build configuration for Greta Cloud Run containers
+# This builds and pushes the base Docker image to Artifact Registry
+
+steps:
+  # Build the Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/greta-preview:${SHORT_SHA}'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/greta-preview:latest'
+      - '.'
+
+  # Push the image to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/greta-preview:${SHORT_SHA}'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/greta-preview:latest'
+
+substitutions:
+  _REGION: us-central1
+  _REPOSITORY: greta-containers
+
+images:
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/greta-preview:${SHORT_SHA}'
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/greta-preview:latest'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+

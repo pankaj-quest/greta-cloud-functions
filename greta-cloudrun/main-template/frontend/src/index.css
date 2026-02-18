@@ -1,0 +1,76 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 40 20% 98%;
+    --foreground: 220 20% 15%;
+    --card: 40 15% 96%;
+    --card-foreground: 220 20% 15%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 20% 15%;
+    --primary: 220 60% 50%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 40 15% 92%;
+    --secondary-foreground: 220 20% 15%;
+    --muted: 40 10% 90%;
+    --muted-foreground: 220 10% 50%;
+    --accent: 220 60% 95%;
+    --accent-foreground: 220 60% 40%;
+    --destructive: 0 70% 55%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 220 15% 88%;
+    --input: 220 15% 88%;
+    --ring: 220 60% 50%;
+    --radius: 0.75rem;
+    --sidebar-background: 0 0% 98%;
+    --sidebar-foreground: 240 5.3% 26.1%;
+    --sidebar-primary: 240 5.9% 10%;
+    --sidebar-primary-foreground: 0 0% 98%;
+    --sidebar-accent: 240 4.8% 95.9%;
+    --sidebar-accent-foreground: 240 5.9% 10%;
+    --sidebar-border: 220 13% 91%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+
+  .dark {
+    --background: 220 20% 10%;
+    --foreground: 40 20% 95%;
+    --card: 220 18% 13%;
+    --card-foreground: 40 20% 95%;
+    --popover: 220 18% 13%;
+    --popover-foreground: 40 20% 95%;
+    --primary: 220 60% 60%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 220 15% 18%;
+    --secondary-foreground: 40 20% 95%;
+    --muted: 220 15% 20%;
+    --muted-foreground: 220 10% 55%;
+    --accent: 220 40% 20%;
+    --accent-foreground: 220 60% 70%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 220 15% 22%;
+    --input: 220 15% 22%;
+    --ring: 220 60% 60%;
+    --sidebar-background: 240 5.9% 10%;
+    --sidebar-foreground: 240 4.8% 95.9%;
+    --sidebar-primary: 224.3 76.3% 48%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 240 3.7% 15.9%;
+    --sidebar-accent-foreground: 240 4.8% 95.9%;
+    --sidebar-border: 240 3.7% 15.9%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Inter', system-ui, sans-serif;
+  }
+}

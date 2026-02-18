@@ -1,0 +1,27 @@
+# Dependencies
+node_modules
+template/node_modules
+
+# Build outputs
+dist
+*.log
+
+# IDE
+.vscode
+.idea
+
+# Git
+.git
+.gitignore
+
+# Local env
+.env
+.env.local
+
+# Tests
+*.test.js
+__tests__
+
+# Documentation
+*.md
+

@@ -1,0 +1,54 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+.Python
+env/
+venv/
+.venv/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Build outputs
+dist/
+dist-ssr/
+build/
+*.local
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+Thumbs.db
+
+# OS files
+.DS_Store
+*.swp
+*.swo
+
+# Temp files
+temp-notes-app/
+*.tmp
+*.temp
+
+# Package locks (optional - uncomment if you don't want to track these)
+# package-lock.json
+# yarn.lock
+

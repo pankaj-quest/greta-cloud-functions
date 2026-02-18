@@ -1,0 +1,24 @@
+{
+  "name": "greta-cloudrun-server",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Cloud Run container for Greta - Vite dev server with HMR",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "@google-cloud/storage": "^7.7.0",
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "http-proxy-middleware": "^2.0.6",
+    "fs-extra": "^11.2.0",
+    "archiver": "^6.0.1",
+    "extract-zip": "^2.0.1",
+    "openai": "^4.68.0",
+    "glob": "^10.3.10",
+    "mongodb": "^6.3.0"
+  }
+}
+
