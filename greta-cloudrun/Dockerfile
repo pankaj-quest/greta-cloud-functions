@@ -1,15 +1,37 @@
-# Greta Cloud Run Container - Vite Dev Server with HMR + Python Backend + MongoDB
+# Greta Cloud Run Container - Vite Dev Server with HMR + Python Backend + MongoDB + Playwright
 # Use Debian-based image for easier MongoDB installation
 FROM node:20-slim
 
-# Install useful tools + Python + MongoDB
+# Install useful tools + Python + MongoDB + Playwright dependencies + unzip (for Bun) + lz4 (fast decompression)
 RUN apt-get update && apt-get install -y \
     git \
     curl \
     gnupg \
+    unzip \
+    lz4 \
     python3 \
     python3-pip \
     python3-venv \
+    # Playwright dependencies for Chromium
+    libnss3 \
+    libnspr4 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libdbus-1-3 \
+    libxkbcommon0 \
+    libatspi2.0-0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    libgbm1 \
+    libasound2 \
+    libpango-1.0-0 \
+    libcairo2 \
+    fonts-liberation \
+    fonts-noto-color-emoji \
     && rm -rf /var/lib/apt/lists/*
 
 # Install MongoDB from official repo
@@ -42,9 +64,17 @@ COPY main-template/backend/ /backend-template/
 WORKDIR /backend-template
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Node.js dependencies in frontend template
+# Install Bun for fast package management
+RUN curl -fsSL https://bun.sh/install | bash
+ENV PATH="/root/.bun/bin:$PATH"
+
+# Pre-populate bun cache and node_modules at build time
+# - Keep node_modules in template for fast symlink path
+# - Create lz4-compressed tar of bun cache for slow path (when deps differ)
 WORKDIR /frontend-template
-RUN npm install --legacy-peer-deps
+RUN bun install && \
+    tar -cf - -C /root/.bun/install cache | lz4 -9 > /bun-cache.tar.lz4
+# NOTE: We do NOT delete node_modules - it's needed for symlink fast path!
 
 # Go back to app directory
 WORKDIR /app
@@ -52,6 +82,9 @@ WORKDIR /app
 # Copy server files
 COPY package.json ./
 RUN npm install
+
+# Install Playwright with Chromium only (smaller than all browsers)
+RUN npx playwright install chromium --with-deps
 
 COPY server.js ./
 COPY lib/ ./lib/

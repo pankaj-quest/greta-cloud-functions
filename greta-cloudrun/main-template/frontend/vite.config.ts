@@ -11,8 +11,14 @@ export default defineConfig(({ mode }) => ({
       overlay: true,
     },
   },
+  // Use writable cache directory from env (Cloud Run overlayfs doesn't like node_modules/.vite)
+  // Falls back to .vite in project dir if env not set
+  cacheDir: process.env.VITE_CACHE_DIR || path.resolve(__dirname, ".vite"),
   plugins: [react()],
   resolve: {
+    // Force all packages to use the same React instance (prevents "Invalid hook call" errors)
+    // This is critical when using pnpm's symlinked node_modules structure
+    dedupe: ['react', 'react-dom', 'react-router-dom', 'scheduler'],
     alias: {
       "@": path.resolve(__dirname, "./src"),
     },

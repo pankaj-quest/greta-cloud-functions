@@ -28,6 +28,10 @@ const GCP_PROJECT = 'velosapps-464607';
 const GCP_REGION = 'us-central1';
 const GCS_BUCKET = 'greta-projects';
 
+// Latest image version - UPDATE THIS when pushing new features!
+const LATEST_IMAGE_VERSION = 'v18'; // Fix: GCS sync function signature mismatch
+const CONTAINER_IMAGE = `${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/greta-containers/greta-preview:v18`;
+
 // OpenRouter API Key (set this in your environment!)
 const OPEN_ROUTER_API_KEY = process.env.OPEN_ROUTER_API_KEY || '';
 
@@ -54,15 +58,40 @@ const createOpenRouterClient = (apiKey) => {
   });
 };
 
-// Load emergent system prompt from file
+/**
+ * Sanitize code content from LLM double-escaping issues
+ * Some models (like Gemini) incorrectly escape template literals in JSON
+ * This fixes: \` -> ` and \${ -> ${
+ */
+function sanitizeCodeContent(content) {
+  if (!content || typeof content !== 'string') return content;
+
+  // Fix double-escaped template literals: \` -> `
+  // Fix double-escaped template expressions: \${ -> ${
+  // But be careful not to break actual escape sequences
+  let sanitized = content
+    // Fix \` that should be ` (template literal backticks)
+    .replace(/\\`/g, '`')
+    // Fix \${ that should be ${ (template expressions)
+    .replace(/\\\${/g, '${');
+
+  // Log if we made changes (for debugging)
+  if (sanitized !== content) {
+    console.log('[SANITIZE] Fixed double-escaped template literals in code content');
+  }
+
+  return sanitized;
+}
+
+// Load Greta system prompt from file
 let SYSTEM_PROMPT = '';
 try {
-  const promptPath = path.join(__dirname, 'emergent-system-prompt.txt');
+  const promptPath = path.join(__dirname, 'greta-system-prompt.txt');
   if (fs.existsSync(promptPath)) {
     SYSTEM_PROMPT = fs.readFileSync(promptPath, 'utf-8');
-    console.log(`✅ Loaded Emergent system prompt (${SYSTEM_PROMPT.length} chars)`);
+    console.log(`✅ Loaded Greta system prompt (${SYSTEM_PROMPT.length} chars)`);
   } else {
-    console.log('⚠️ emergent-system-prompt.txt not found, using fallback');
+    console.log('⚠️ greta-system-prompt.txt not found, using fallback');
     SYSTEM_PROMPT = `You are Greta, an expert AI assistant that helps users build full-stack applications.`;
   }
 } catch (err) {
@@ -182,6 +211,20 @@ const TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'mcp_remove_dependency',
+      description: 'Remove/uninstall an npm package from the frontend project. Use this when a dependency is causing errors, conflicts, or is no longer needed. This runs npm uninstall.',
+      parameters: {
+        type: 'object',
+        properties: {
+          packageName: { type: 'string', description: 'Name of the npm package to uninstall (e.g., "@studio-freight/lenis", "lodash")' }
+        },
+        required: ['packageName']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'mcp_add_python_dependency',
       description: 'Install a Python package to the backend project. Use this when you need to add a new dependency like pyjwt, bcrypt, requests, etc. The package will be installed via pip and added to requirements.txt automatically.',
       parameters: {
@@ -189,6 +232,20 @@ const TOOLS = [
         properties: {
           packageName: { type: 'string', description: 'Name of the Python package to install (e.g., "pyjwt", "bcrypt", "requests", "pillow")' },
           version: { type: 'string', description: 'Optional specific version to install (e.g., "2.8.0"). If not provided, installs latest.' }
+        },
+        required: ['packageName']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'mcp_remove_python_dependency',
+      description: 'Remove/uninstall a Python package from the backend project. Use this when a dependency is causing errors or is no longer needed. This runs pip uninstall and removes from requirements.txt.',
+      parameters: {
+        type: 'object',
+        properties: {
+          packageName: { type: 'string', description: 'Name of the Python package to uninstall (e.g., "lenis", "requests")' }
         },
         required: ['packageName']
       }
@@ -205,6 +262,162 @@ const TOOLS = [
           clear: { type: 'boolean', description: 'If true, clears logs after reading. Default is false.' }
         },
         required: []
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'mcp_get_vite_logs',
+      description: 'Get Vite/frontend build logs and errors. Use this to debug TypeScript errors, build failures, missing imports, or HMR issues. Returns recent Vite stdout/stderr including compilation errors.',
+      parameters: {
+        type: 'object',
+        properties: {
+          type: { type: 'string', enum: ['all', 'errors', 'stdout'], description: 'Type of logs to retrieve. "errors" for only errors, "stdout" for only output, "all" for both. Default is "all".' },
+          clear: { type: 'boolean', description: 'If true, clears logs after reading. Default is false.' }
+        },
+        required: []
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'mcp_screenshot',
+      description: 'Take a screenshot of the frontend preview. Use this to SEE what the UI looks like, debug visual issues, or verify your changes rendered correctly. Returns a base64 PNG image. Also captures browser console errors to help debug blank/broken pages!',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Route path to screenshot (e.g., "/dashboard", "/contacts", "/login"). Default is "/" (home page).' },
+          fullPage: { type: 'boolean', description: 'If true, captures the entire scrollable page. If false (default), captures only the visible viewport.' },
+          width: { type: 'integer', description: 'Viewport width in pixels. Default is 1280.' },
+          height: { type: 'integer', description: 'Viewport height in pixels. Default is 720.' },
+          selector: { type: 'string', description: 'Optional CSS selector to screenshot a specific element (e.g., "#main-content", ".hero-section").' },
+          waitFor: { type: 'integer', description: 'Milliseconds to wait after page load for dynamic content. Default is 2000.' }
+        },
+        required: []
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'mcp_screenshot_bulk',
+      description: 'Take screenshots of multiple routes in ONE call. More efficient than calling mcp_screenshot multiple times. Use this to check multiple pages at once (e.g., login, dashboard, contacts). Returns array of screenshots with console errors for each.',
+      parameters: {
+        type: 'object',
+        properties: {
+          paths: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Array of route paths to screenshot (e.g., ["/login", "/dashboard", "/contacts"]). Max 5 paths per call.'
+          },
+          width: { type: 'integer', description: 'Viewport width in pixels. Default is 1280.' },
+          height: { type: 'integer', description: 'Viewport height in pixels. Default is 720.' },
+          waitFor: { type: 'integer', description: 'Milliseconds to wait after page load for dynamic content. Default is 2000.' }
+        },
+        required: ['paths']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'mcp_view_bulk',
+      description: 'PREFERRED for viewing 2+ files. View multiple files in ONE call instead of multiple mcp_view_file calls. More efficient and faster. Returns content of all requested files.',
+      parameters: {
+        type: 'object',
+        properties: {
+          paths: {
+            type: 'array',
+            description: 'Array of file paths to view (1-20 files)',
+            items: { type: 'string' },
+            minItems: 1,
+            maxItems: 20
+          }
+        },
+        required: ['paths']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'crawl_tool',
+      description: 'Fetch and extract content from any webpage URL. Returns the page content as clean markdown. Use this when you need to read documentation, articles, or any web content. Handles JavaScript-rendered pages.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: {
+            type: 'string',
+            description: 'The full URL of the webpage to fetch (e.g., https://docs.example.com/guide)'
+          },
+          formats: {
+            type: 'string',
+            enum: ['markdown', 'html', 'text'],
+            description: 'Output format. Default is markdown.'
+          }
+        },
+        required: ['url']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'web_search_tool_v2',
+      description: 'Search the web for current information, documentation, tutorials, or any topic. Returns search results with titles, URLs, and snippets. Use this when you need to find information but dont know the specific URL.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description: 'The search query (e.g., "React 19 new features", "Tailwind CSS v4 migration guide")'
+          },
+          num_results: {
+            type: 'integer',
+            description: 'Number of results to return (1-10). Default is 5.'
+          }
+        },
+        required: ['query']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'mcp_rename',
+      description: 'Rename or move a file/directory. Use this instead of deleting and recreating files. Can also move files between directories.',
+      parameters: {
+        type: 'object',
+        properties: {
+          original_path: {
+            type: 'string',
+            description: 'Current file path (e.g., "frontend/src/old-name.tsx")'
+          },
+          new_path: {
+            type: 'string',
+            description: 'New file path (e.g., "frontend/src/new-name.tsx")'
+          }
+        },
+        required: ['original_path', 'new_path']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'finish',
+      description: 'ALWAYS call this tool when you complete a task. Provide a concise summary of what was done, files changed, and any important notes for the next message or handoff. This helps maintain context continuity.',
+      parameters: {
+        type: 'object',
+        properties: {
+          summary: {
+            type: 'string',
+            description: 'Concise summary of: 1) What was accomplished, 2) Files created/modified, 3) Any follow-up actions needed'
+          }
+        },
+        required: ['summary']
       }
     }
   },
@@ -243,10 +456,12 @@ const createToolExecutors = (cloudRunUrl) => ({
   // Create/write file - uses POST /api/write-file
   async mcp_create_file({ path: filePath, file_text }) {
     try {
+      // Sanitize code content to fix LLM double-escaping issues (e.g., Gemini)
+      const sanitizedContent = sanitizeCodeContent(file_text);
       const response = await fetch(`${cloudRunUrl}/api/write-file`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: filePath, file_text })
+        body: JSON.stringify({ path: filePath, file_text: sanitizedContent })
       });
       return await response.json();
     } catch (err) {
@@ -254,13 +469,104 @@ const createToolExecutors = (cloudRunUrl) => ({
     }
   },
 
+  // Bulk view files - uses POST /api/bulk-read-files
+  async mcp_view_bulk({ paths }) {
+    try {
+      const response = await fetch(`${cloudRunUrl}/api/bulk-read-files`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paths })
+      });
+      return await response.json();
+    } catch (err) {
+      return { error: `Failed to call Cloud Run: ${err.message}` };
+    }
+  },
+
+  // Crawl/fetch webpage content using Jina AI Reader (free, no API key)
+  async crawl_tool({ url, formats = 'markdown' }) {
+    if (!url) {
+      return { error: 'url is required' };
+    }
+    try {
+      // Jina AI Reader - prefix URL to get markdown content
+      const jinaUrl = `https://r.jina.ai/${url}`;
+      const response = await fetch(jinaUrl, {
+        headers: {
+          'Accept': 'text/plain',
+        }
+      });
+
+      if (!response.ok) {
+        return { error: `Failed to fetch: ${response.status} ${response.statusText}` };
+      }
+
+      const content = await response.text();
+      return {
+        success: true,
+        url,
+        format: formats,
+        content,
+        length: content.length
+      };
+    } catch (err) {
+      return { error: `Failed to crawl URL: ${err.message}` };
+    }
+  },
+
+  // Web search using Google Custom Search API
+  async web_search_tool_v2({ query, num_results = 5 }) {
+    if (!query) {
+      return { error: 'query is required' };
+    }
+
+    const apiKey = process.env.GOOGLE_API_KEY;
+    const cx = process.env.GOOGLE_CX;
+
+    if (!apiKey || !cx) {
+      return { error: 'Google Search API not configured. Set GOOGLE_API_KEY and GOOGLE_CX environment variables.' };
+    }
+
+    try {
+      const searchUrl = `https://www.googleapis.com/customsearch/v1?key=${apiKey}&cx=${cx}&q=${encodeURIComponent(query)}&num=${Math.min(num_results, 10)}`;
+      const response = await fetch(searchUrl);
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        return { error: `Google Search API error: ${errorData.error?.message || response.statusText}` };
+      }
+
+      const data = await response.json();
+      const results = (data.items || []).map(item => ({
+        title: item.title,
+        url: item.link,
+        snippet: item.snippet,
+        displayLink: item.displayLink
+      }));
+
+      return {
+        success: true,
+        query,
+        totalResults: data.searchInformation?.totalResults || '0',
+        results
+      };
+    } catch (err) {
+      return { error: `Web search failed: ${err.message}` };
+    }
+  },
+
   // Bulk write files - uses POST /api/bulk-write-files
   async mcp_bulk_file_writer({ files }) {
     try {
+      // Sanitize code content in each file to fix LLM double-escaping issues
+      const sanitizedFiles = files.map(f => ({
+        ...f,
+        content: sanitizeCodeContent(f.content)
+      }));
       const response = await fetch(`${cloudRunUrl}/api/bulk-write-files`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ files })
+        body: JSON.stringify({ files: sanitizedFiles })
       });
       return await response.json();
     } catch (err) {
@@ -280,6 +586,36 @@ const createToolExecutors = (cloudRunUrl) => ({
     } catch (err) {
       return { error: `Failed to call Cloud Run: ${err.message}` };
     }
+  },
+
+  // Rename/move file - uses POST /api/rename-file
+  async mcp_rename({ original_path, new_path }) {
+    try {
+      const response = await fetch(`${cloudRunUrl}/api/rename-file`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ original_path, new_path })
+      });
+      return await response.json();
+    } catch (err) {
+      return { error: `Failed to call Cloud Run: ${err.message}` };
+    }
+  },
+
+  // Finish tool - provides summary for context continuity
+  async finish({ summary }) {
+    if (!summary) {
+      return { error: 'summary is required' };
+    }
+
+    console.log('[FINISH] Task Summary:', summary);
+
+    return {
+      success: true,
+      summary,
+      timestamp: new Date().toISOString(),
+      message: 'Task completed and summary recorded'
+    };
   },
 
   // TEMPORARILY DISABLED - execute_bash
@@ -310,6 +646,20 @@ const createToolExecutors = (cloudRunUrl) => ({
     }
   },
 
+  // Remove npm dependency - uses POST /api/remove-dependency
+  async mcp_remove_dependency({ packageName }) {
+    try {
+      const response = await fetch(`${cloudRunUrl}/api/remove-dependency`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ packageName })
+      });
+      return await response.json();
+    } catch (err) {
+      return { error: `Failed to call Cloud Run: ${err.message}` };
+    }
+  },
+
   // Add Python dependency - uses POST /api/add-python-dependency
   async mcp_add_python_dependency({ packageName, version }) {
     try {
@@ -317,6 +667,20 @@ const createToolExecutors = (cloudRunUrl) => ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ packageName, version })
+      });
+      return await response.json();
+    } catch (err) {
+      return { error: `Failed to call Cloud Run: ${err.message}` };
+    }
+  },
+
+  // Remove Python dependency - uses POST /api/remove-python-dependency
+  async mcp_remove_python_dependency({ packageName }) {
+    try {
+      const response = await fetch(`${cloudRunUrl}/api/remove-python-dependency`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ packageName })
       });
       return await response.json();
     } catch (err) {
@@ -345,6 +709,149 @@ const createToolExecutors = (cloudRunUrl) => ({
       return data;
     } catch (err) {
       return { error: `Failed to fetch backend logs: ${err.message}` };
+    }
+  },
+
+  // Get Vite/frontend logs - uses GET /api/console-logs
+  async mcp_get_vite_logs({ type = 'all', clear = false }) {
+    try {
+      const params = new URLSearchParams();
+      params.append('type', type);
+      if (clear) params.append('clear', 'true');
+
+      const response = await fetch(`${cloudRunUrl}/api/console-logs?${params}`, {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      const data = await response.json();
+
+      // Format errors nicely for the AI
+      if (data.hasErrors && data.errorCount > 0) {
+        data.errorSummary = `⚠️ VITE BUILD ERRORS FOUND (${data.errorCount}):\n${data.logs.slice(0, 10).join('\n\n')}`;
+      }
+
+      return data;
+    } catch (err) {
+      return { error: `Failed to fetch Vite logs: ${err.message}` };
+    }
+  },
+
+  // Take screenshot - uses POST /api/screenshot
+  async mcp_screenshot({ path = '/', fullPage = false, width = 1280, height = 720, selector = null, waitFor = 2000 }) {
+    try {
+      // Build full URL with the specified path
+      const cleanPath = path.startsWith('/') ? path : `/${path}`;
+      const targetUrl = `http://localhost:5173${cleanPath}`;
+
+      console.log(`[Screenshot] Capturing: ${targetUrl}`);
+
+      const response = await fetch(`${cloudRunUrl}/api/screenshot`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: targetUrl,  // Screenshot the specified route
+          fullPage,
+          width,
+          height,
+          selector,
+          waitFor
+        })
+      });
+      const data = await response.json();
+
+      if (data.success) {
+        // Return info for AI (base64 image is large, so summarize)
+        const result = {
+          success: true,
+          message: `📸 Screenshot of "${cleanPath}" captured (${Math.round(data.size / 1024)}KB)`,
+          path: cleanPath,
+          url: targetUrl,
+          dimensions: data.dimensions,
+          imageBase64: data.image,  // The actual screenshot
+          mimeType: data.mimeType
+        };
+
+        // Pass through console errors from browser - CRITICAL for debugging!
+        if (data.consoleErrors && data.consoleErrors.length > 0) {
+          result.consoleErrors = data.consoleErrors;
+          result.hasErrors = true;
+          result.message += ` ⚠️ ${data.consoleErrors.length} console errors detected!`;
+        }
+
+        return result;
+      } else {
+        return { error: data.error, hint: data.hint, path: cleanPath };
+      }
+    } catch (err) {
+      return { error: `Failed to take screenshot: ${err.message}` };
+    }
+  },
+
+  // Take multiple screenshots in one call - more efficient!
+  async mcp_screenshot_bulk({ paths, width = 1280, height = 720, waitFor = 2000 }) {
+    try {
+      // Limit to 5 paths max to avoid overwhelming the system
+      const limitedPaths = paths.slice(0, 5);
+
+      console.log(`[Screenshot Bulk] Capturing ${limitedPaths.length} pages...`);
+
+      const results = [];
+
+      for (const routePath of limitedPaths) {
+        const cleanPath = routePath.startsWith('/') ? routePath : `/${routePath}`;
+        const targetUrl = `http://localhost:5173${cleanPath}`;
+
+        console.log(`[Screenshot Bulk] Capturing: ${targetUrl}`);
+
+        try {
+          const response = await fetch(`${cloudRunUrl}/api/screenshot`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              url: targetUrl,
+              fullPage: false,
+              width,
+              height,
+              waitFor
+            })
+          });
+          const data = await response.json();
+
+          if (data.success) {
+            const result = {
+              success: true,
+              path: cleanPath,
+              url: targetUrl,
+              size: `${Math.round(data.size / 1024)}KB`,
+              dimensions: data.dimensions,
+              imageBase64: data.image,
+              mimeType: data.mimeType
+            };
+
+            if (data.consoleErrors && data.consoleErrors.length > 0) {
+              result.consoleErrors = data.consoleErrors;
+              result.hasErrors = true;
+            }
+
+            results.push(result);
+          } else {
+            results.push({ success: false, path: cleanPath, error: data.error });
+          }
+        } catch (err) {
+          results.push({ success: false, path: cleanPath, error: err.message });
+        }
+      }
+
+      const successCount = results.filter(r => r.success).length;
+      const errorCount = results.filter(r => r.hasErrors).length;
+
+      return {
+        success: true,
+        message: `📸 Captured ${successCount}/${limitedPaths.length} screenshots${errorCount > 0 ? ` (${errorCount} with console errors!)` : ''}`,
+        screenshots: results
+      };
+    } catch (err) {
+      return { error: `Failed to take bulk screenshots: ${err.message}` };
     }
   }
 });
@@ -418,26 +925,49 @@ async function fetchViteLogs(cloudRunUrl) {
   }
 }
 
+// Fetch TypeScript errors (catches errors Vite HMR misses - lazy-loaded pages, unused components)
+async function fetchTypeScriptErrors(cloudRunUrl) {
+  try {
+    const response = await fetch(`${cloudRunUrl}/api/typescript-check`);
+    const data = await response.json();
+    return data;
+  } catch (err) {
+    console.log(`[TS Check] Failed to fetch: ${err.message}`);
+    return null;
+  }
+}
+
 // Execute a tool call
 async function executeTool(toolExecutors, name, input, cloudRunUrl) {
-  console.log(`[Tool Call] ${name}`, JSON.stringify(input).slice(0, 200));
+  const toolStartTime = Date.now();
+  console.log(`[Tool Call] ${name} started...`, JSON.stringify(input).slice(0, 200));
   const executor = toolExecutors[name];
   if (!executor) return { error: `Unknown tool: ${name}` };
   const result = await executor(input);
-  console.log(`[Tool Result] ${name}:`, JSON.stringify(result).slice(0, 300));
+  const toolDuration = ((Date.now() - toolStartTime) / 1000).toFixed(2);
+  console.log(`[Tool Result] ${name} completed in ${toolDuration}s:`, JSON.stringify(result).slice(0, 300));
 
-  // For file-modifying tools, wait a moment for Vite to process and then check for errors
+  // For file-modifying tools, check for errors
   if (FILE_MODIFYING_TOOLS.includes(name) && cloudRunUrl) {
     // Wait for Vite to process the file change
     await new Promise(resolve => setTimeout(resolve, 1500));
 
+    // Check Vite HMR errors (fast, catches currently loaded modules)
     const viteLogs = await fetchViteLogs(cloudRunUrl);
     if (viteLogs && viteLogs.hasErrors && viteLogs.cleanErrors && viteLogs.cleanErrors.length > 0) {
-      const errors = viteLogs.cleanErrors.slice(0, 5); // Limit to 5 unique errors
+      const errors = viteLogs.cleanErrors.slice(0, 5);
       console.log(`[Vite Errors] Found ${errors.length} errors after ${name}:`, errors);
-      // Attach clean Vite errors to the result so AI can see and fix them
       result.vite_errors = errors;
       result.vite_error_message = `⚠️ VITE BUILD ERROR! Fix these before proceeding:\n${errors.map((e, i) => `${i + 1}. ${e}`).join('\n')}`;
+    }
+
+    // Also run TypeScript check (catches ALL errors including lazy-loaded pages)
+    const tsCheck = await fetchTypeScriptErrors(cloudRunUrl);
+    if (tsCheck && tsCheck.hasErrors && tsCheck.errors && tsCheck.errors.length > 0) {
+      const tsErrors = tsCheck.errors.slice(0, 5);
+      console.log(`[TS Errors] Found ${tsErrors.length} TypeScript errors after ${name}:`, tsErrors);
+      result.ts_errors = tsErrors;
+      result.ts_error_message = `⚠️ TYPESCRIPT ERRORS! These will break other pages. Fix now:\n${tsErrors.map((e, i) => `${i + 1}. ${e}`).join('\n')}`;
     }
   }
 
@@ -533,10 +1063,20 @@ app.post('/api/conversations', async (req, res) => {
 async function deployCloudRunContainer(chatId, serviceName, db) {
   console.log(`🚀 Deploying Cloud Run container: ${serviceName}...`);
 
-  const image = `gcr.io/${GCP_PROJECT}/greta-agentic:test`;
   const envVars = `PROJECT_ID=${chatId},GCS_BUCKET=${GCS_BUCKET},MONGO_URL=${MONGO_URL},DB_NAME=${DB_NAME}`;
 
-  const cmd = `gcloud run deploy ${serviceName} --image=${image} --region=${GCP_REGION} --allow-unauthenticated --set-env-vars="${envVars}" --memory=4Gi --cpu=2 --timeout=3600 --min-instances=0 --max-instances=1 --execution-environment=gen2 --project=${GCP_PROJECT}`;
+  const cmd = `gcloud run deploy ${serviceName} \
+    --image=${CONTAINER_IMAGE} \
+    --region=${GCP_REGION} \
+    --allow-unauthenticated \
+    --set-env-vars="${envVars}" \
+    --memory=4Gi \
+    --cpu=1 \
+    --timeout=3600 \
+    --min-instances=0 \
+    --max-instances=1 \
+    --execution-environment=gen2 \
+    --project=${GCP_PROJECT}`;
 
   try {
     const { stdout, stderr } = await execAsync(cmd, { timeout: 300000 }); // 5 min timeout
@@ -557,6 +1097,52 @@ async function deployCloudRunContainer(chatId, serviceName, db) {
   }
 }
 
+// GET /api/latest-version - Get latest available image version
+app.get('/api/latest-version', (req, res) => {
+  res.json({
+    version: LATEST_IMAGE_VERSION,
+    image: CONTAINER_IMAGE
+  });
+});
+
+// POST /api/conversations/:chatId/redeploy - Redeploy container to latest image
+app.post('/api/conversations/:chatId/redeploy', async (req, res) => {
+  try {
+    const { chatId } = req.params;
+    const db = await connectMongo();
+
+    // Find conversation
+    const convo = await db.collection('conversations').findOne({ id: chatId });
+    if (!convo) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+
+    const serviceName = `greta-${chatId}`;
+
+    // Update status to 'updating'
+    await db.collection('conversations').updateOne(
+      { id: chatId },
+      { $set: { status: 'updating', updated_at: new Date().toISOString() } }
+    );
+
+    // Respond immediately so UI doesn't wait
+    res.json({
+      success: true,
+      message: 'Redeployment started',
+      chatId,
+      newVersion: LATEST_IMAGE_VERSION
+    });
+
+    // Redeploy in background
+    console.log(`🔄 Redeploying container ${serviceName} to latest image...`);
+    deployCloudRunContainer(chatId, serviceName, db);
+
+  } catch (err) {
+    console.error('Error redeploying container:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/conversations/:chatId/messages - Get messages
 app.get('/api/conversations/:chatId/messages', async (req, res) => {
   try {
@@ -576,21 +1162,23 @@ app.post('/api/chat', async (req, res) => {
   const {
     message,
     chat_uuid,
-    model = 'google/gemini-3-flash-preview',
+    image_url ='https://media-manager-c.questera.ai/greta-media/a82d46baad788cfac770e191944228d9a0cfc7a602dde7be66cdc121710e14b5d98183d1a2888432bc9f21dfb726db64/images/aW1hZ2Uvd2VicA==/20b005ce07efc8a1474640dc102b7720.webp',  // Optional image URL for vision support
+    model = 'google/gemini-3.1-pro-preview',
     max_tokens = 32000,  // Increased for large tool calls
     temperature = 0.8,
     api_key
   } = req.body;
 
-  if (!message) {
-    return res.status(400).json({ error: 'message is required' });
+  if (!message && !image_url) {
+    return res.status(400).json({ error: 'message or image_url is required' });
   }
 
   const chatId = chat_uuid || `chat-${Date.now()}`;
   console.log(`\n========== NEW CHAT REQUEST ==========`);
   console.log(`[Chat API] chatId: ${chatId}`);
   console.log(`[Chat API] model: ${model}`);
-  console.log(`[Chat API] message: ${message.slice(0, 100)}...`);
+  console.log(`[Chat API] message: ${message ? message.slice(0, 100) : '(no message)'}...`);
+  console.log(`[Chat API] image_url: ${image_url ? image_url.slice(0, 80) + '...' : 'NONE'}`);
 
   // Check if API key is available
   const effectiveApiKey = api_key || OPEN_ROUTER_API_KEY;
@@ -615,7 +1203,7 @@ app.post('/api/chat', async (req, res) => {
     const toolExecutors = createToolExecutors(cloudRunUrl);
     console.log(`[Chat API] Cloud Run URL for tools: ${cloudRunUrl}`);
 
-    // Save user message
+    // Save user message (WITHOUT image_url - images are one-time use, not stored in history)
     await saveMessage(db, chatId, 'user', message);
 
     // Get project file structure from Cloud Run
@@ -635,24 +1223,177 @@ app.post('/api/chat', async (req, res) => {
       console.log('[Chat API] Could not fetch project structure:', err.message);
     }
 
-    // Load chat history (including tool calls and results)
+    // Load chat history (tool calls + results stored in same document)
     const dbMessages = await db.collection('messages')
       .find({ conversation_id: chatId })
       .sort({ timestamp: 1 })
       .toArray();
 
-    const history = dbMessages.map(msg => {
-      const base = { role: msg.role, content: msg.content };
-      // Include tool_calls for assistant messages that have them
-      if (msg.tool_calls) {
-        base.tool_calls = msg.tool_calls;
+    console.log('\n' + '='.repeat(60));
+    console.log('[HISTORY] Loading chat history from MongoDB...');
+    console.log(`[HISTORY] Found ${dbMessages.length} messages in DB`);
+
+    // Convert DB format to LLM API format
+    // DB stores: { role: 'assistant', tool_calls: [{ id, function, result }] }
+    // LLM needs: assistant message + separate tool messages
+    const history = [];
+    let skippedToolMessages = 0;
+
+    // Helper to generate summary from tool calls
+    const generateToolSummary = (toolCalls) => {
+      return toolCalls.map(tc => {
+        const name = tc.function?.name || 'unknown';
+        const args = tc.function?.arguments;
+        if (name === 'finish') {
+          const parsed = typeof args === 'string' ? JSON.parse(args) : args;
+          return `[FINISHED: ${parsed?.summary || 'Task completed'}]`;
+        } else if (name.includes('file') || name.includes('write') || name.includes('create')) {
+          return `[Used ${name} to modify files]`;
+        } else {
+          return `[Used ${name}]`;
+        }
+      }).join(' ');
+    };
+
+    for (const msg of dbMessages) {
+      if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+        // Generate summary of tool calls for history context
+        const content = msg.content || generateToolSummary(msg.tool_calls);
+
+        // MERGE consecutive assistant messages instead of adding multiple
+        const lastEntry = history[history.length - 1];
+        if (lastEntry && lastEntry.role === 'assistant') {
+          // Append to existing assistant message with newline separator
+          lastEntry.content += '\n' + content;
+          console.log(`[HISTORY] Merged assistant action: ${content.substring(0, 60)}...`);
+        } else {
+          history.push({ role: 'assistant', content });
+          console.log(`[HISTORY] Including assistant action: ${content.substring(0, 60)}...`);
+        }
+      } else if (msg.role === 'tool') {
+        // Skip old-format tool messages too
+        skippedToolMessages++;
+      } else {
+        // Regular user/assistant message - keep these (images not stored in history)
+        // Also merge consecutive assistant messages here
+        const lastEntry = history[history.length - 1];
+        if (msg.role === 'assistant' && lastEntry && lastEntry.role === 'assistant') {
+          lastEntry.content += '\n' + msg.content;
+          console.log(`[HISTORY] Merged text assistant message`);
+        } else {
+          history.push({ role: msg.role, content: msg.content });
+        }
       }
-      // Include tool_call_id for tool result messages
-      if (msg.tool_call_id) {
-        base.tool_call_id = msg.tool_call_id;
+    }
+
+    console.log(`[HISTORY] Skipped ${skippedToolMessages} old-format tool messages`);
+    console.log(`[HISTORY] Final history entries for LLM: ${history.length}`);
+    console.log('='.repeat(60) + '\n');
+
+    // ============ EXTRACT RECENTLY MODIFIED FILES ============
+    console.log('\n' + '='.repeat(60));
+    console.log('[FILE CONTEXT] Extracting recently modified files...');
+    console.log(`[FILE CONTEXT] Total messages in DB: ${dbMessages.length}`);
+
+    const recentFilePaths = new Set();
+    const fileModifyingTools = ['mcp_create_file', 'mcp_bulk_file_writer', 'mcp_search_replace'];
+
+    // Helper to normalize paths for deduplication (handle /app/project/ prefix and variations)
+    const normalizePath = (p) => {
+      if (!p) return null;
+      // Remove leading /app/project/ if present
+      let normalized = p.replace(/^\/app\/project\//, '');
+      // Also handle paths that start with just the directory
+      normalized = normalized.replace(/^(frontend|backend)\//, '$1/');
+      return normalized;
+    };
+
+    // Track normalized paths to prevent duplicates
+    const normalizedPathSet = new Set();
+
+    // Iterate from newest to oldest
+    for (let i = dbMessages.length - 1; i >= 0 && recentFilePaths.size < 10; i--) {
+      const msg = dbMessages[i];
+      if (msg.role === 'assistant' && msg.tool_calls) {
+        console.log(`[FILE CONTEXT] Checking msg[${i}]: assistant with ${msg.tool_calls.length} tool_calls`);
+        for (const tc of msg.tool_calls) {
+          if (recentFilePaths.size >= 10) break;
+          const toolName = tc.function?.name;
+          console.log(`[FILE CONTEXT]   - Tool: ${toolName}, has result: ${!!tc.result}`);
+
+          if (fileModifyingTools.includes(toolName)) {
+            try {
+              const args = JSON.parse(tc.function.arguments);
+              // mcp_create_file and mcp_search_replace have 'path'
+              if (args.path) {
+                const normalized = normalizePath(args.path);
+                if (normalized && !normalizedPathSet.has(normalized)) {
+                  console.log(`[FILE CONTEXT]     → Found path: ${args.path} (normalized: ${normalized})`);
+                  normalizedPathSet.add(normalized);
+                  recentFilePaths.add(args.path);
+                } else if (normalized) {
+                  console.log(`[FILE CONTEXT]     → Skipping duplicate: ${args.path}`);
+                }
+              }
+              // mcp_bulk_file_writer has 'files' array with 'path' in each
+              if (args.files && Array.isArray(args.files)) {
+                for (const f of args.files) {
+                  if (f.path && recentFilePaths.size < 10) {
+                    const normalized = normalizePath(f.path);
+                    if (normalized && !normalizedPathSet.has(normalized)) {
+                      console.log(`[FILE CONTEXT]     → Found bulk path: ${f.path} (normalized: ${normalized})`);
+                      normalizedPathSet.add(normalized);
+                      recentFilePaths.add(f.path);
+                    } else if (normalized) {
+                      console.log(`[FILE CONTEXT]     → Skipping duplicate bulk path: ${f.path}`);
+                    }
+                  }
+                }
+              }
+            } catch (e) {
+              console.log(`[FILE CONTEXT]     ✗ Could not parse arguments: ${e.message}`);
+            }
+          }
+        }
       }
-      return base;
-    });
+    }
+
+    console.log(`[FILE CONTEXT] Found ${recentFilePaths.size} unique file paths: ${[...recentFilePaths].join(', ')}`);
+
+    // Helper to ensure consistent display path (always start with /app/project/)
+    const toDisplayPath = (p) => {
+      if (!p) return p;
+      // Remove /app/project/ if present, then add it back for consistency
+      const stripped = p.replace(/^\/app\/project\//, '');
+      return `/app/project/${stripped}`;
+    };
+
+    // Fetch LATEST content of these files from Cloud Run container
+    const recentFilesContext = [];
+    if (recentFilePaths.size > 0) {
+      console.log(`[FILE CONTEXT] Fetching file contents from Cloud Run...`);
+      for (const filePath of recentFilePaths) {
+        try {
+          console.log(`[FILE CONTEXT]   Fetching: ${filePath}`);
+          const result = await toolExecutors.mcp_view_file({ path: filePath });
+          if (result.success && result.content) {
+            recentFilesContext.push({
+              path: toDisplayPath(filePath),  // Use consistent display path
+              content: result.content
+            });
+            console.log(`[FILE CONTEXT]   ✓ Got: ${filePath} (${result.content.length} chars)`);
+          } else {
+            console.log(`[FILE CONTEXT]   ✗ Failed: ${filePath} - ${JSON.stringify(result)}`);
+          }
+        } catch (err) {
+          console.log(`[FILE CONTEXT]   ✗ Error fetching ${filePath}: ${err.message}`);
+        }
+      }
+      console.log(`[FILE CONTEXT] Successfully fetched ${recentFilesContext.length}/${recentFilePaths.size} files`);
+    } else {
+      console.log(`[FILE CONTEXT] No recent files to fetch`);
+    }
+    console.log('='.repeat(60) + '\n');
 
     // Create OpenRouter client
     const client = createOpenRouterClient(effectiveApiKey);
@@ -664,6 +1405,62 @@ app.post('/api/chat', async (req, res) => {
       ...history
     ];
 
+    // Combine file context + current user message into ONE user message
+    // Format: content: [{ type: 'text', text: 'file context' }, { type: 'text', text: 'user message' }]
+    // This prevents AI confusion about what user actually asked
+    if (recentFilesContext.length > 0) {
+      const fileContextText = recentFilesContext.map(f =>
+        `File: ${f.path}\n\`\`\`\n${f.content}\n\`\`\``
+      ).join('\n\n');
+
+      // Find the last user message (current request) and modify it
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === 'user') {
+          const userMessage = messages[i].content;
+          const contentParts = [
+            { type: 'text', text: `Here are the ${recentFilesContext.length} most recently modified files (current state):\n\n${fileContextText}` }
+          ];
+
+          // Add user's actual message
+          if (typeof userMessage === 'string' && userMessage) {
+            contentParts.push({ type: 'text', text: userMessage });
+          } else if (Array.isArray(userMessage)) {
+            contentParts.push(...userMessage);
+          }
+
+          // If image_url provided, add it too
+          // if (image_url) {
+            contentParts.push({ type: 'image_url', image_url: { url: image_url } });
+            console.log(`[Chat API] Added image to current request (one-time, not stored in history)`);
+          // }
+
+          messages[i].content = contentParts;
+          console.log(`[Chat API] Combined ${recentFilesContext.length} files + user message into single message`);
+          break;
+        }
+      }
+    } else if (image_url) {
+      // No file context, but has image - just add image to last user message
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === 'user') {
+          const currentContent = messages[i].content;
+          const contentParts = [];
+          if (typeof currentContent === 'string') {
+            if (currentContent) {
+              contentParts.push({ type: 'text', text: currentContent });
+            }
+          } else if (Array.isArray(currentContent)) {
+            contentParts.push(...currentContent);
+          }
+          contentParts.pusnh({ type: 'image_url', image_url: { url: image_url } });
+          messages[i].content = contentParts;
+          console.log(`[Chat API] Added image to current request (one-time, not stored in history)`);
+          break;
+        }
+      }
+    }
+
+    
     // ============ DEBUG: LOG FULL CONTEXT BEING SENT TO AI ============
     console.log('\n' + '='.repeat(80));
     console.log('[AI CONTEXT] Full payload being sent to OpenRouter:');
@@ -694,18 +1491,31 @@ app.post('/api/chat', async (req, res) => {
     const maxLoops = 20;
     let loopCount = 0;
 
+    console.log(JSON.stringify(messages, null, 2));
+
+    // return;
+
     while (loopCount < maxLoops) {
       loopCount++;
-      console.log(`[Chat API] Loop ${loopCount}/${maxLoops}`);
+      const loopStartTime = Date.now();
+      console.log(`\n[Chat API] ═══════════════ Loop ${loopCount}/${maxLoops} START ═══════════════`);
+
+      // Send loop_start event so frontend knows agent is thinking
+      sendSSE({ type: 'loop_start', loop: loopCount, maxLoops });
 
       // Create streaming chat completion WITH TOOLS
+      const llmStartTime = Date.now();
+      console.log(`[TIMING] LLM request started...`);
       const stream = await client.chat.completions.create({
         model,
         max_tokens,
         messages,
         tools: TOOLS,
         temperature,
-        stream: true
+        stream: true,
+        reasoning: {
+          max_tokens: 1000
+        }
       });
 
       // Process stream
@@ -740,6 +1550,9 @@ app.post('/api/chat', async (req, res) => {
         }
       }
 
+      const llmEndTime = Date.now();
+      console.log(`[TIMING] LLM streaming completed in ${((llmEndTime - llmStartTime) / 1000).toFixed(2)}s`);
+
       // Process tool calls if any
       if (toolCalls.size > 0) {
         const toolCallsArray = [];
@@ -759,51 +1572,254 @@ app.post('/api/chat', async (req, res) => {
 
         console.log(`[Chat API] Got ${toolCallsArray.length} tool calls`);
 
-        // Build tool_calls array for the message
-        const toolCallsForMessage = toolCallsArray.map(tc => ({
-          id: tc.id,
-          type: 'function',
-          function: { name: tc.name, arguments: JSON.stringify(tc.input) }
-        }));
-
-        // Add assistant message with tool calls to messages array
-        messages.push({
-          role: 'assistant',
-          content: currentText || null,
-          tool_calls: toolCallsForMessage
-        });
-
-        // Save assistant message with tool_calls to MongoDB
-        await saveMessage(db, chatId, 'assistant', currentText || null, { tool_calls: toolCallsForMessage });
-
-        // Execute tools and add results
+        // Execute tools FIRST, collect results, then save ONE combined document
         let hasFileChanges = false;
+        let finishCalled = false;
+        const toolCallsWithResults = [];
+
         for (const tc of toolCallsArray) {
-          sendSSE({ type: 'tool_call', name: tc.name, input: tc.input });
+          const toolStartTime = Date.now();
+          sendSSE({ type: 'tool_call', name: tc.name, input: tc.input, status: 'executing' });
+
+          // Send file_change events BEFORE executing for real-time display
+          if (tc.name === 'mcp_bulk_file_writer' && tc.input.files) {
+            for (const file of tc.input.files) {
+              sendSSE({
+                type: 'file_change',
+                path: file.path.replace('/app/project/', ''),
+                content: file.content,
+                operation: 'create',
+                tool: tc.name
+              });
+            }
+          } else if (tc.name === 'mcp_create_file' && tc.input.path) {
+            sendSSE({
+              type: 'file_change',
+              path: tc.input.path.replace('/app/project/', ''),
+              content: tc.input.content,
+              operation: 'create',
+              tool: tc.name
+            });
+          } else if (tc.name === 'mcp_search_replace' && tc.input.path) {
+            sendSSE({
+              type: 'file_change',
+              path: tc.input.path.replace('/app/project/', ''),
+              oldStr: tc.input.old_str,
+              newStr: tc.input.new_str,
+              operation: 'replace',
+              tool: tc.name
+            });
+          }
+
           const result = await executeTool(toolExecutors, tc.name, tc.input, cloudRunUrl);
-          sendSSE({ type: 'tool_result', name: tc.name, result });
+          const toolDuration = ((Date.now() - toolStartTime) / 1000).toFixed(2);
+          sendSSE({ type: 'tool_result', name: tc.name, result, duration: toolDuration, status: 'completed' });
 
           // Track if any file-modifying tools were called
           if (['mcp_create_file', 'mcp_bulk_file_writer', 'mcp_search_replace'].includes(tc.name)) {
             hasFileChanges = true;
           }
 
-          const toolResultContent = typeof result === 'string' ? result : JSON.stringify(result);
+          // Track if finish tool was called - agent is done with task
+          if (tc.name === 'finish') {
+            finishCalled = true;
+            console.log(`[Chat API] 🏁 Agent called finish tool - will exit loop after saving`);
+          }
 
-          // Add to messages array
+          // Store tool call with its result
+          const toolCallWithResult = {
+            id: tc.id,
+            type: 'function',
+            function: { name: tc.name, arguments: JSON.stringify(tc.input) },
+            result: typeof result === 'string' ? result : JSON.stringify(result)
+          };
+
+          // Handle screenshot specially - don't store base64 in DB
+          if (tc.name === 'mcp_screenshot' && result.success && result.imageBase64) {
+            // Save screenshot locally for debugging
+            const screenshotDir = path.join(__dirname, 'screenshots');
+            if (!fs.existsSync(screenshotDir)) {
+              fs.mkdirSync(screenshotDir, { recursive: true });
+            }
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+            const screenshotPath = path.join(screenshotDir, `screenshot-${timestamp}.png`);
+            fs.writeFileSync(screenshotPath, Buffer.from(result.imageBase64, 'base64'));
+            console.log(`[Chat API] 📸 Screenshot saved to: ${screenshotPath}`);
+
+            // Build result with console errors if present
+            const screenshotResult = {
+              success: true,
+              message: result.message,
+              dimensions: result.dimensions,
+              savedTo: screenshotPath
+            };
+
+            // Include console errors so agent can debug!
+            if (result.consoleErrors && result.consoleErrors.length > 0) {
+              screenshotResult.consoleErrors = result.consoleErrors;
+              screenshotResult.hasErrors = true;
+              console.log(`[Chat API] ⚠️ Screenshot captured ${result.consoleErrors.length} console errors`);
+            }
+
+            toolCallWithResult.result = JSON.stringify(screenshotResult);
+
+            // Build text context for the agent
+            let screenshotContext = `Here is the screenshot (${result.dimensions?.width}x${result.dimensions?.height}).`;
+
+            // If there are console errors, include them prominently!
+            if (result.consoleErrors && result.consoleErrors.length > 0) {
+              screenshotContext += `\n\n🚨 BROWSER CONSOLE ERRORS DETECTED:\n`;
+              result.consoleErrors.forEach((err, i) => {
+                screenshotContext += `${i + 1}. ${err}\n`;
+              });
+              screenshotContext += `\nFIX THESE ERRORS - they explain why the page may be blank or broken.`;
+            } else {
+              screenshotContext += ` Analyze what you see.`;
+            }
+
+            // Add image as user message so LLM can see it (in memory only)
+            messages.push({
+              role: 'user',
+              content: [
+                {
+                  type: 'image_url',
+                  image_url: { url: `data:image/png;base64,${result.imageBase64}` }
+                },
+                {
+                  type: 'text',
+                  text: screenshotContext
+                }
+              ]
+            });
+            console.log(`[Chat API] 📸 Screenshot added as vision content`);
+          }
+
+          // Handle bulk screenshots - add multiple images for the agent to see
+          if (tc.name === 'mcp_screenshot_bulk' && result.success && result.screenshots) {
+            const screenshotDir = path.join(__dirname, 'screenshots');
+            if (!fs.existsSync(screenshotDir)) {
+              fs.mkdirSync(screenshotDir, { recursive: true });
+            }
+
+            // Build multimodal content with all screenshots
+            const contentParts = [];
+            let contextText = `📸 Bulk screenshots captured (${result.screenshots.length} pages):\n\n`;
+
+            for (const screenshot of result.screenshots) {
+              if (screenshot.success && screenshot.imageBase64) {
+                // Save locally
+                const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+                const screenshotPath = path.join(screenshotDir, `screenshot-bulk-${screenshot.path.replace(/\//g, '-')}-${timestamp}.png`);
+                fs.writeFileSync(screenshotPath, Buffer.from(screenshot.imageBase64, 'base64'));
+                console.log(`[Chat API] 📸 Bulk screenshot saved: ${screenshotPath}`);
+
+                // Add to vision content
+                contentParts.push({
+                  type: 'image_url',
+                  image_url: { url: `data:image/png;base64,${screenshot.imageBase64}` }
+                });
+
+                // Build context text
+                contextText += `📄 ${screenshot.path}:\n`;
+                if (screenshot.hasErrors && screenshot.consoleErrors) {
+                  contextText += `  🚨 ERRORS:\n`;
+                  screenshot.consoleErrors.forEach((err, i) => {
+                    contextText += `    ${i + 1}. ${err}\n`;
+                  });
+                } else {
+                  contextText += `  ✅ No console errors\n`;
+                }
+                contextText += `\n`;
+              }
+            }
+
+            // Add text context
+            contentParts.push({
+              type: 'text',
+              text: contextText + '\nAnalyze these screenshots and fix any issues.'
+            });
+
+            // Add all images as single user message
+            messages.push({
+              role: 'user',
+              content: contentParts
+            });
+
+            // Clear imageBase64 from stored result (too large for DB)
+            const cleanResult = {
+              ...result,
+              screenshots: result.screenshots.map(s => ({
+                success: s.success,
+                path: s.path,
+                hasErrors: s.hasErrors,
+                consoleErrors: s.consoleErrors,
+                error: s.error
+              }))
+            };
+            toolCallWithResult.result = JSON.stringify(cleanResult);
+
+            console.log(`[Chat API] 📸 Bulk screenshots (${result.screenshots.length}) added as vision content`);
+          }
+
+          toolCallsWithResults.push(toolCallWithResult);
+
+          // Add tool result to messages array for LLM (required by API)
           messages.push({
             role: 'tool',
             tool_call_id: tc.id,
-            content: toolResultContent
+            content: toolCallWithResult.result
           });
-
-          // Save tool result to MongoDB
-          await saveMessage(db, chatId, 'tool', toolResultContent, { tool_call_id: tc.id });
         }
+
+        // Build tool_calls for OpenAI API format (without results - API doesn't accept them)
+        const toolCallsForMessage = toolCallsWithResults.map(tc => ({
+          id: tc.id,
+          type: 'function',
+          function: tc.function
+        }));
+
+        // Insert assistant message BEFORE tool results in messages array
+        const insertIndex = messages.length - toolCallsWithResults.length;
+        messages.splice(insertIndex, 0, {
+          role: 'assistant',
+          content: currentText || null,
+          tool_calls: toolCallsForMessage
+        });
+
+        // Save ONE document to MongoDB with tool_calls AND results together
+        console.log('\n' + '-'.repeat(60));
+        console.log('[STORAGE] Saving assistant message with tool_calls + results:');
+        console.log(`[STORAGE] Content: ${currentText ? currentText.substring(0, 100) + '...' : 'null'}`);
+        console.log(`[STORAGE] Tool calls count: ${toolCallsWithResults.length}`);
+        toolCallsWithResults.forEach((tc, i) => {
+          const argsPreview = tc.function.arguments.substring(0, 100);
+          const resultPreview = tc.result.substring(0, 100);
+          console.log(`[STORAGE]   [${i}] ${tc.function.name}`);
+          console.log(`[STORAGE]       args: ${argsPreview}...`);
+          console.log(`[STORAGE]       result: ${resultPreview}...`);
+        });
+
+        await saveMessage(db, chatId, 'assistant', currentText || null, {
+          tool_calls: toolCallsWithResults  // Contains: id, function (name + arguments), result
+        });
+        console.log(`[STORAGE] ✓ Saved to MongoDB: ${toolCallsWithResults.length} tool calls with results`);
+        console.log('-'.repeat(60) + '\n');
 
         // Signal frontend to refresh preview if files were changed
         if (hasFileChanges) {
           sendSSE({ type: 'refresh_preview' });
+        }
+
+        const loopDuration = ((Date.now() - loopStartTime) / 1000).toFixed(2);
+        console.log(`[Chat API] ═══════════════ Loop ${loopCount}/${maxLoops} END (${loopDuration}s) ═══════════════\n`);
+
+        // Send loop_end event with timing info
+        sendSSE({ type: 'loop_end', loop: loopCount, duration: loopDuration });
+
+        // If finish tool was called, break out of the loop - agent is done
+        if (finishCalled) {
+          console.log(`[Chat API] 🏁 Breaking out of loop - finish tool was called`);
+          break;
         }
 
         // Continue loop for next LLM response
@@ -811,7 +1827,8 @@ app.post('/api/chat', async (req, res) => {
       }
 
       // No tool calls - done, save assistant response to MongoDB
-      console.log(`[Chat API] No tool calls, finishing with ${currentText.length} chars`);
+      const loopDuration = ((Date.now() - loopStartTime) / 1000).toFixed(2);
+      console.log(`[Chat API] No tool calls, finishing with ${currentText.length} chars (loop took ${loopDuration}s)`);
       await saveMessage(db, chatId, 'assistant', currentText);
       break;
     }
