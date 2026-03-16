@@ -1,16 +1,10 @@
 /**
  * ═══════════════════════════════════════════════════════════════════════════════
- * LOGS API ROUTER
+ * LOGS API MODULE
  * ═══════════════════════════════════════════════════════════════════════════════
  *
- * Handles log retrieval endpoints for Vite/frontend and Python backend.
- * Provides access to in-memory log buffers maintained in state.js
- *
- * Endpoints:
- * - GET /console-logs - Get Vite/frontend logs
- * - GET /backend-logs - Get Python backend logs
- * - GET /vite-errors - Get Vite compilation errors
- * - POST /clear-logs - Clear log buffers
+ * Console and backend log retrieval and management.
+ * Provides endpoints to get Vite (frontend) and FastAPI (backend) logs.
  *
  * @module api/logs
  */
@@ -20,115 +14,93 @@ import { logs, clearLogs } from '../../core/state.js';
 
 const router = express.Router();
 
-
 /* ─────────────────────────────────────────────────────────────────────────────
- * GET /console-logs - Vite/Frontend Logs
+ * FRONTEND (VITE) LOGS
  * ───────────────────────────────────────────────────────────────────────────── */
 
 /**
- * Get Vite/frontend console logs
- * @query {string} type - 'all' | 'errors' | 'logs' (default: 'all')
- * @query {boolean} clear - Clear logs after reading (default: false)
- * @query {number} limit - Max entries to return (default: 50)
+ * GET /api/console-logs - Get Vite console logs.
+ *
+ * Query params:
+ * - type: 'all' | 'errors' | 'stdout' (default: 'all')
+ * - clear: 'true' to clear logs after reading
  */
 router.get('/console-logs', (req, res) => {
-  const { type = 'all', clear = false, limit = 50 } = req.query;
-  const maxEntries = Math.min(parseInt(limit) || 50, 200);
+  const { type = 'all', clear = false } = req.query;
 
-  let result = {
-    logs: [],
-    errors: [],
-    hasErrors: false,
-    errorCount: 0,
-  };
-
-  if (type === 'all' || type === 'logs') {
-    result.logs = logs.vite.slice(-maxEntries).map(l => l.message);
+  // Select logs based on type
+  let logList;
+  if (type === 'errors') {
+    logList = logs.viteErrors;
+  } else if (type === 'stdout') {
+    logList = logs.vite;
+  } else {
+    // Combine and sort by timestamp
+    logList = [...logs.vite, ...logs.viteErrors].sort((a, b) => a.timestamp - b.timestamp);
   }
 
-  if (type === 'all' || type === 'errors') {
-    result.errors = logs.viteErrors.slice(-maxEntries).map(l => l.message);
-    result.hasErrors = result.errors.length > 0;
-    result.errorCount = result.errors.length;
+  const hasErrors = logs.viteErrors.length > 0;
+
+  // Optionally clear logs after reading
+  if (clear === 'true') {
+    if (type === 'errors' || type === 'all') clearLogs('vite');
+    if (type === 'stdout' || type === 'all') clearLogs('vite');
   }
-
-  if (clear === 'true' || clear === true) {
-    clearLogs('vite');
-  }
-
-  res.json(result);
-});
-
-
-/* ─────────────────────────────────────────────────────────────────────────────
- * GET /backend-logs - Python Backend Logs
- * ───────────────────────────────────────────────────────────────────────────── */
-
-/**
- * Get Python/FastAPI backend logs
- * @query {boolean} clear - Clear logs after reading (default: false)
- * @query {number} limit - Max entries to return (default: 50)
- */
-router.get('/backend-logs', (req, res) => {
-  const { clear = false, limit = 50 } = req.query;
-  const maxEntries = Math.min(parseInt(limit) || 50, 200);
-
-  const result = {
-    logs: logs.backend.slice(-maxEntries).map(l => l.message),
-    errors: logs.backendErrors.slice(-maxEntries).map(l => l.message),
-    hasErrors: logs.backendErrors.length > 0,
-    errorCount: logs.backendErrors.length,
-  };
-
-  if (clear === 'true' || clear === true) {
-    clearLogs('backend');
-  }
-
-  res.json(result);
-});
-
-
-/* ─────────────────────────────────────────────────────────────────────────────
- * GET /vite-errors - Vite Compilation Errors Only
- * ───────────────────────────────────────────────────────────────────────────── */
-
-/**
- * Get only Vite compilation/build errors
- * Useful for quick error checking without full logs
- */
-router.get('/vite-errors', (req, res) => {
-  const { limit = 20 } = req.query;
-  const maxEntries = Math.min(parseInt(limit) || 20, 100);
-
-  const errors = logs.viteErrors.slice(-maxEntries).map(l => l.message);
-
-  res.json({
-    errors,
-    hasErrors: errors.length > 0,
-    errorCount: errors.length,
-  });
-});
-
-
-/* ─────────────────────────────────────────────────────────────────────────────
- * POST /clear-logs - Clear Log Buffers
- * ───────────────────────────────────────────────────────────────────────────── */
-
-/**
- * Clear log buffers
- * @body {string} type - 'all' | 'vite' | 'backend' (default: 'all')
- */
-router.post('/clear-logs', (req, res) => {
-  const { type = 'all' } = req.body || {};
-
-  clearLogs(type);
 
   res.json({
     success: true,
-    cleared: type,
+    hasErrors,
+    errorCount: logs.viteErrors.length,
+    logs: logList.map(l => l.message),
+    rawLogs: logList
   });
 });
 
+/**
+ * POST /api/clear-logs - Clear all console logs.
+ */
+router.post('/clear-logs', (req, res) => {
+  clearLogs('all');
+  res.json({ success: true, message: 'Logs cleared' });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * BACKEND (FASTAPI) LOGS
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * GET /api/backend-logs - Get Python/FastAPI backend logs.
+ *
+ * Query params:
+ * - clear: 'true' to clear logs after reading
+ * - limit: number of logs to return (default: 50)
+ */
+router.get('/backend-logs', (req, res) => {
+  const { clear = false, limit = 50 } = req.query;
+  const limitNum = parseInt(limit) || 50;
+
+  // Get backend logs and errors
+  const allLogs = logs.backend.slice(-limitNum);
+  const errorLogs = logs.backendErrors.slice(-limitNum);
+
+  // Combine and sort by timestamp
+  const combined = [...allLogs, ...errorLogs].sort((a, b) => a.timestamp - b.timestamp);
+
+  const hasErrors = errorLogs.length > 0;
+
+  // Optionally clear logs after reading
+  if (clear === 'true') {
+    clearLogs('backend');
+  }
+
+  res.json({
+    success: true,
+    hasErrors,
+    errorCount: errorLogs.length,
+    logs: combined.map(l => l.message),
+    errors: errorLogs.map(l => l.message),
+    rawLogs: combined
+  });
+});
 
 export default router;
-
