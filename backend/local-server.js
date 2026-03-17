@@ -306,16 +306,32 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'mcp_screenshot',
-      description: 'Take a screenshot of the frontend preview. Use this to SEE what the UI looks like, debug visual issues, or verify your changes rendered correctly. Returns a base64 PNG image. Also captures browser console errors to help debug blank/broken pages!',
+      description: 'Take a screenshot of the frontend preview. Can perform actions BEFORE screenshot (login, fill forms, navigate) to reach authenticated pages. Returns a base64 PNG image + console errors.',
       parameters: {
         type: 'object',
         properties: {
-          path: { type: 'string', description: 'Route path to screenshot (e.g., "/dashboard", "/contacts", "/login"). Default is "/" (home page).' },
+          path: { type: 'string', description: 'Route path to screenshot (e.g., "/dashboard", "/contacts", "/login"). Default is "/" (home page). Ignored if actions are provided.' },
           fullPage: { type: 'boolean', description: 'If true, captures the entire scrollable page. If false (default), captures only the visible viewport.' },
           width: { type: 'integer', description: 'Viewport width in pixels. Default is 1280.' },
           height: { type: 'integer', description: 'Viewport height in pixels. Default is 720.' },
           selector: { type: 'string', description: 'Optional CSS selector to screenshot a specific element (e.g., "#main-content", ".hero-section").' },
-          waitFor: { type: 'integer', description: 'Milliseconds to wait after page load for dynamic content. Default is 2000.' }
+          waitFor: { type: 'integer', description: 'Milliseconds to wait after page load for dynamic content. Default is 2000.' },
+          actions: {
+            type: 'array',
+            description: 'Optional actions to perform BEFORE taking screenshot. Use this for authenticated pages - login first, then navigate.',
+            items: {
+              type: 'object',
+              properties: {
+                type: { type: 'string', enum: ['goto', 'fill', 'click', 'wait', 'waitForSelector', 'type', 'select', 'check', 'uncheck', 'hover', 'press'], description: 'Action type' },
+                selector: { type: 'string', description: 'CSS selector for the element (for fill, click, type, etc.)' },
+                value: { type: 'string', description: 'Value for fill/type/select actions' },
+                url: { type: 'string', description: 'URL for goto action (can be full URL or relative like "/login")' },
+                ms: { type: 'integer', description: 'Milliseconds for wait action' },
+                key: { type: 'string', description: 'Key for press action (e.g., "Enter", "Tab")' }
+              },
+              required: ['type']
+            }
+          }
         },
         required: []
       }
@@ -423,6 +439,95 @@ const TOOLS = [
           }
         },
         required: ['original_path', 'new_path']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'local_frontend_testing_agent',
+      description: 'Run automated UI tests with Playwright. Can fill forms, click buttons, navigate pages, and validate UI elements. Returns screenshots and test results. Use this for E2E testing of the frontend.',
+      parameters: {
+        type: 'object',
+        properties: {
+          actions: {
+            type: 'array',
+            description: 'Array of browser actions to perform. Each action is an object with "type" and other properties.',
+            items: {
+              type: 'object',
+              properties: {
+                type: {
+                  type: 'string',
+                  enum: ['goto', 'fill', 'click', 'wait', 'waitForSelector', 'type', 'select', 'check', 'uncheck', 'hover', 'press', 'assertText', 'assertVisible', 'assertUrl', 'getText', 'getAttribute', 'getInputValue', 'count'],
+                  description: 'Action type'
+                },
+                selector: { type: 'string', description: 'CSS selector for the element' },
+                value: { type: 'string', description: 'Value for fill/type/select actions' },
+                url: { type: 'string', description: 'URL for goto action (can be relative like "/login")' },
+                expected: { type: 'string', description: 'Expected value for assertions' },
+                ms: { type: 'integer', description: 'Milliseconds for wait action' },
+                screenshot: { type: 'boolean', description: 'Take screenshot after this action' }
+              },
+              required: ['type']
+            }
+          }
+        },
+        required: ['actions']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'local_backend_testing_agent',
+      description: 'Test backend APIs and optionally verify results in the browser. Can make HTTP requests to test endpoints and then check if data appears correctly in the UI.',
+      parameters: {
+        type: 'object',
+        properties: {
+          apiTests: {
+            type: 'array',
+            description: 'Array of API tests to run',
+            items: {
+              type: 'object',
+              properties: {
+                method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'], description: 'HTTP method' },
+                url: { type: 'string', description: 'Full URL to test (e.g., "http://localhost:8000/api/users")' },
+                body: { type: 'object', description: 'Request body for POST/PUT/PATCH' },
+                headers: { type: 'object', description: 'Additional headers' },
+                expectedStatus: { type: 'integer', description: 'Expected HTTP status code (default: 200)' },
+                expectedBody: { type: 'object', description: 'Expected fields in response body' }
+              },
+              required: ['url']
+            }
+          },
+          browserActions: {
+            type: 'array',
+            description: 'Optional browser actions to verify UI after API calls (same format as frontend testing agent)',
+            items: { type: 'object' }
+          }
+        },
+        required: ['apiTests']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'local_browser_automation_agent',
+      description: 'General-purpose browser automation. Can perform any action a human can do in a browser: fill forms, click buttons, navigate, scrape data, take screenshots. Use for complex multi-step user journeys.',
+      parameters: {
+        type: 'object',
+        properties: {
+          actions: {
+            type: 'array',
+            description: 'Array of browser actions (same format as frontend testing agent)',
+            items: { type: 'object' }
+          },
+          script: {
+            type: 'string',
+            description: 'Advanced: Raw Playwright script to execute. Use "page" for the page object, "log(msg)" to log, "screenshot(name)" to capture.'
+          }
+        }
       }
     }
   },
@@ -798,25 +903,40 @@ const createToolExecutors = (cloudRunUrl) => ({
   },
 
   // Take screenshot - uses POST /api/screenshot
-  async mcp_screenshot({ path = '/', fullPage = false, width = 1280, height = 720, selector = null, waitFor = 2000 }) {
+  // Now supports actions (login, fill forms, navigate) BEFORE taking screenshot
+  async mcp_screenshot({ path = '/', fullPage = false, width = 1280, height = 720, selector = null, waitFor = 2000, actions = [] }) {
     try {
-      // Build full URL with the specified path
-      const cleanPath = path.startsWith('/') ? path : `/${path}`;
-      const targetUrl = `http://localhost:5173${cleanPath}`;
+      const hasActions = actions && Array.isArray(actions) && actions.length > 0;
 
-      console.log(`[Screenshot] Capturing: ${targetUrl}`);
+      // Build request body
+      const requestBody = {
+        fullPage,
+        width,
+        height,
+        selector,
+        waitFor
+      };
+
+      if (hasActions) {
+        // Convert relative URLs in actions to full URLs
+        requestBody.actions = actions.map(action => {
+          if (action.type === 'goto' && action.url && !action.url.startsWith('http')) {
+            return { ...action, url: `http://localhost:5173${action.url.startsWith('/') ? action.url : '/' + action.url}` };
+          }
+          return action;
+        });
+        console.log(`[Screenshot] Executing ${actions.length} actions then capturing...`);
+      } else {
+        // Simple path-based screenshot
+        const cleanPath = path.startsWith('/') ? path : `/${path}`;
+        requestBody.url = `http://localhost:5173${cleanPath}`;
+        console.log(`[Screenshot] Capturing: ${requestBody.url}`);
+      }
 
       const response = await fetch(`${cloudRunUrl}/api/screenshot`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          url: targetUrl,  // Screenshot the specified route
-          fullPage,
-          width,
-          height,
-          selector,
-          waitFor
-        })
+        body: JSON.stringify(requestBody)
       });
       const data = await response.json();
 
@@ -824,13 +944,20 @@ const createToolExecutors = (cloudRunUrl) => ({
         // Return info for AI (base64 image is large, so summarize)
         const result = {
           success: true,
-          message: `📸 Screenshot of "${cleanPath}" captured (${Math.round(data.size / 1024)}KB)`,
-          path: cleanPath,
-          url: targetUrl,
+          message: `📸 Screenshot captured (${Math.round(data.size / 1024)}KB)`,
+          url: data.url,  // Actual URL after any navigation
           dimensions: data.dimensions,
           imageBase64: data.image,  // The actual screenshot
           mimeType: data.mimeType
         };
+
+        // Include action results if actions were performed
+        if (hasActions && data.actionsExecuted) {
+          result.message = `📸 Screenshot captured after ${data.actionsSucceeded}/${data.actionsExecuted} actions (${Math.round(data.size / 1024)}KB)`;
+          result.actionsExecuted = data.actionsExecuted;
+          result.actionsSucceeded = data.actionsSucceeded;
+          result.actionResults = data.actionResults;
+        }
 
         // Pass through console errors from browser - CRITICAL for debugging!
         if (data.consoleErrors && data.consoleErrors.length > 0) {
@@ -841,7 +968,7 @@ const createToolExecutors = (cloudRunUrl) => ({
 
         return result;
       } else {
-        return { error: data.error, hint: data.hint, path: cleanPath };
+        return { error: data.error, hint: data.hint };
       }
     } catch (err) {
       return { error: `Failed to take screenshot: ${err.message}` };
@@ -913,6 +1040,123 @@ const createToolExecutors = (cloudRunUrl) => ({
       };
     } catch (err) {
       return { error: `Failed to take bulk screenshots: ${err.message}` };
+    }
+  },
+
+  // ============ LOCAL AGENTS ============
+
+  // Frontend Testing Agent - UI testing with Playwright
+  async local_frontend_testing_agent({ actions }) {
+    try {
+      if (!actions || !Array.isArray(actions) || actions.length === 0) {
+        return { error: 'actions array is required' };
+      }
+
+      console.log(`[Frontend Testing] Running ${actions.length} UI test actions...`);
+
+      const response = await fetch(`${cloudRunUrl}/api/agents/frontend-test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ actions, baseUrl: 'http://localhost:5173' })
+      });
+      const data = await response.json();
+
+      if (data.success) {
+        return {
+          success: true,
+          message: `🧪 UI Tests: ${data.successfulActions}/${data.totalActions} actions passed`,
+          results: data.results,
+          consoleErrors: data.consoleErrors,
+          // Return last screenshot for vision
+          finalScreenshot: data.screenshots?.find(s => s.final)?.image
+        };
+      } else {
+        return {
+          success: false,
+          error: data.error,
+          results: data.results,
+          failedAt: data.results?.find(r => !r.success)
+        };
+      }
+    } catch (err) {
+      return { error: `Frontend testing failed: ${err.message}` };
+    }
+  },
+
+  // Backend Testing Agent - API testing + browser validation
+  async local_backend_testing_agent({ apiTests, browserActions = [] }) {
+    try {
+      if (!apiTests || !Array.isArray(apiTests) || apiTests.length === 0) {
+        return { error: 'apiTests array is required' };
+      }
+
+      console.log(`[Backend Testing] Running ${apiTests.length} API tests...`);
+
+      const response = await fetch(`${cloudRunUrl}/api/agents/backend-test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          apiTests,
+          browserActions,
+          baseUrl: 'http://localhost:5173'
+        })
+      });
+      const data = await response.json();
+
+      return {
+        success: data.success,
+        message: `🔧 API Tests: ${data.summary?.apiPassed}/${data.summary?.apiTests} passed` +
+                 (data.browserResults ? `, Browser: ${data.summary?.browserPassed}/${data.summary?.browserActions} passed` : ''),
+        apiResults: data.apiResults,
+        browserResults: data.browserResults,
+        summary: data.summary
+      };
+    } catch (err) {
+      return { error: `Backend testing failed: ${err.message}` };
+    }
+  },
+
+  // Browser Automation Agent - general-purpose automation
+  async local_browser_automation_agent({ actions, script }) {
+    try {
+      if (!actions && !script) {
+        return { error: 'Either actions array or script is required' };
+      }
+
+      console.log(`[Browser Automation] Running ${script ? 'custom script' : `${actions.length} actions`}...`);
+
+      const response = await fetch(`${cloudRunUrl}/api/agents/browser-automate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          actions,
+          script,
+          baseUrl: 'http://localhost:5173'
+        })
+      });
+      const data = await response.json();
+
+      if (data.success) {
+        return {
+          success: true,
+          message: script
+            ? `🤖 Script executed successfully`
+            : `🤖 Automation: ${data.successfulActions}/${data.totalActions} actions completed`,
+          results: data.results,
+          logs: data.logs,
+          consoleErrors: data.consoleErrors,
+          finalScreenshot: data.screenshots?.find(s => s.final || s.name === 'final')?.image
+        };
+      } else {
+        return {
+          success: false,
+          error: data.error,
+          results: data.results,
+          logs: data.logs
+        };
+      }
+    } catch (err) {
+      return { error: `Browser automation failed: ${err.message}` };
     }
   }
 });

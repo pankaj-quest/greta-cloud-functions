@@ -181,5 +181,8 @@ export const EXPRESS_API_ENDPOINTS = [
   
   // Screenshot
   '/screenshot', '/screenshot/health',
+
+  // Agents (browser automation)
+  '/agents/frontend-test', '/agents/backend-test', '/agents/browser-automate', '/agents/health',
 ];
 

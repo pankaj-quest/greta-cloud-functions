@@ -56,6 +56,7 @@ import { loadSecretsFromGCS } from './lib/services/secrets/env-loader.js';
 import fileApiRouter from './lib/api/files/index.js';
 import logsApiRouter from './lib/api/logs/index.js';
 import screenshotApiRouter from './lib/api/screenshot/index.js';
+import agentsApiRouter from './lib/api/agents/index.js';
 import { apiRouter, viteRouter } from './lib/middleware/proxy.js';
 
 const app = express();
@@ -124,6 +125,7 @@ app.post('/api/keepAlive', (req, res) => {
 app.use('/api', fileApiRouter);        // File operations
 app.use('/api', logsApiRouter);        // Console/backend logs
 app.use('/api', screenshotApiRouter);  // Playwright screenshots
+app.use('/api', agentsApiRouter);      // Browser automation agents
 
 // Proxy remaining /api/* to FastAPI backend
 app.use('/api', apiRouter);
