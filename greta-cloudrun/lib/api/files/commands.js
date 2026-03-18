@@ -10,11 +10,15 @@
  */
 
 import express from 'express';
-import { PROJECT_DIR, FRONTEND_DIR } from '../../core/config.js';
+import fs from 'fs-extra';
+import path from 'path';
+import { PROJECT_DIR, FRONTEND_DIR, BACKEND_DIR } from '../../core/config.js';
 import { resolveSafePath, apiResponse, execAsync } from './helpers.js';
 import { restartVite } from '../../services/processes/vite.js';
 import { restartBackend } from '../../services/processes/backend.js';
 import { syncDirectoryToGCS } from '../../services/storage/gcs-sync.js';
+import { syncFromGCS } from '../../services/storage/gcs-sync.js';
+import { loadSecretsFromGCS } from '../../services/secrets/env-loader.js';
 
 const router = express.Router();
 
@@ -419,6 +423,152 @@ router.post('/update-env-and-restart', async (req, res) => {
   } catch (error) {
     console.error('Update env and restart error:', error);
     return apiResponse(res, 500, { error: error.message });
+  }
+});
+
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * RELOAD BACKEND
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * POST /reload-backend - Load latest backend files, install packages, and restart server
+ *
+ * This endpoint performs the following operations:
+ * 1. Applies environment variables from request body to process.env
+ * 2. Loads secrets from GCS
+ * 3. Syncs latest backend files from GCS
+ * 4. Installs Python packages from requirements.txt
+ * 5. Restarts the backend server
+ *
+ * @body {Object} env - Optional environment variables to set (key-value pairs)
+ * @returns {Object} Results of all operations
+ */
+router.post('/reload-backend', async (req, res) => {
+  try {
+    console.log('🔄 Starting backend reload process...');
+
+    const { env = {} } = req.body;
+
+    const results = {
+      envVariablesSet: 0,
+      secretsLoaded: 0,
+      syncedFromGCS: false,
+      packagesInstalled: false,
+      backendRestarted: false,
+      errors: []
+    };
+
+    // Step 1: Apply environment variables from request body
+    try {
+      if (env && typeof env === 'object' && !Array.isArray(env)) {
+        const envKeys = Object.keys(env);
+        if (envKeys.length > 0) {
+          console.log(`🔧 Setting ${envKeys.length} environment variables...`);
+
+          for (const [key, value] of Object.entries(env)) {
+            if (typeof key === 'string' && key.length > 0) {
+              process.env[key] = String(value);
+              console.log(`  ✓ ${key}`);
+            }
+          }
+
+          results.envVariablesSet = envKeys.length;
+          console.log(`✅ Set ${envKeys.length} environment variables`);
+        }
+      }
+    } catch (error) {
+      const errorMsg = `Failed to set environment variables: ${error.message}`;
+      results.errors.push(errorMsg);
+      console.error('❌', errorMsg);
+    }
+
+    // Step 2: Load secrets from GCS
+    try {
+      console.log('🔐 Loading secrets from GCS...');
+      const secrets = await loadSecretsFromGCS();
+      results.secretsLoaded = Object.keys(secrets).length;
+      console.log(`✅ Loaded ${results.secretsLoaded} secrets from GCS`);
+    } catch (error) {
+      const errorMsg = `Failed to load secrets from GCS: ${error.message}`;
+      results.errors.push(errorMsg);
+      console.error('❌', errorMsg);
+    }
+
+    // Step 3: Sync latest files from GCS
+    try {
+      console.log('📥 Syncing backend files from GCS...');
+      const synced = await syncFromGCS(PROJECT_DIR);
+      results.syncedFromGCS = synced;
+      console.log(synced ? '✅ Backend files synced from GCS' : '⚠️ No files synced from GCS');
+    } catch (error) {
+      const errorMsg = `GCS sync failed: ${error.message}`;
+      results.errors.push(errorMsg);
+      console.error('❌', errorMsg);
+    }
+
+    // Step 4: Install Python packages from requirements.txt
+    try {
+      const requirementsPath = path.join(BACKEND_DIR, 'requirements.txt');
+
+      if (await fs.pathExists(requirementsPath)) {
+        console.log('📦 Installing Python packages from requirements.txt...');
+
+        const { stdout, stderr } = await execAsync(
+          '/opt/venv/bin/pip install -r requirements.txt',
+          {
+            cwd: BACKEND_DIR,
+            timeout: 180000 // 3 minutes timeout
+          }
+        );
+
+        if (stdout) console.log(stdout);
+        if (stderr) console.warn(stderr);
+
+        results.packagesInstalled = true;
+        console.log('✅ Python packages installed');
+      } else {
+        console.log('⚠️ No requirements.txt found, skipping package installation');
+        results.packagesInstalled = false;
+      }
+    } catch (error) {
+      const errorMsg = `Package installation failed: ${error.message}`;
+      results.errors.push(errorMsg);
+      console.error('❌', errorMsg);
+    }
+
+    // Step 5: Restart backend server
+    try {
+      console.log('🔄 Restarting backend server...');
+      await restartBackend();
+      results.backendRestarted = true;
+      console.log('✅ Backend server restarted');
+    } catch (error) {
+      const errorMsg = `Backend restart failed: ${error.message}`;
+      results.errors.push(errorMsg);
+      console.error('❌', errorMsg);
+    }
+
+    // Send response
+    const success = results.backendRestarted && results.errors.length === 0;
+    const statusCode = success ? 200 : (results.errors.length > 0 ? 500 : 207); // 207 = Multi-Status
+
+    return apiResponse(res, statusCode, {
+      success,
+      message: success
+        ? 'Backend reloaded successfully'
+        : 'Backend reload completed with errors',
+      ...results,
+      timestamp: Date.now()
+    });
+
+  } catch (error) {
+    console.error('❌ Backend reload failed:', error.message);
+    return apiResponse(res, 500, {
+      success: false,
+      error: error.message,
+      timestamp: Date.now()
+    });
   }
 });
 

@@ -84,9 +84,10 @@ router.use('/', searchRouter);
 router.use('/', dependenciesRouter);
 
 /**
- * Command Execution
+ * Command Execution & Server Management
  * - POST /execute-bash
  * - GET  /typescript-check
+ * - POST  /reload-backend
  */
 router.use('/', commandsRouter);
 
