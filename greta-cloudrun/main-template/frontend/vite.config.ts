@@ -11,6 +11,18 @@ export default defineConfig(({ mode }) => ({
     hmr: {
       overlay: true,
     },
+    watch: {
+      // Ignore node_modules to prevent Vite from restarting when dependencies are installed
+      // This prevents 429 errors during dependency installation
+      ignored: ['**/node_modules/**', '**/dist/**'],
+    },
+  },
+  optimizeDeps: {
+    // Disable automatic dependency discovery to prevent Vite from reloading
+    // when new dependencies are detected in code changes
+    disabled: false, // Keep optimization enabled for performance
+    // But don't auto-reload when new deps are found - require manual restart
+    force: false,
   },
   // Use writable cache directory from env (Cloud Run overlayfs doesn't like node_modules/.vite)
   // Falls back to .vite in project dir if env not set

@@ -10,6 +10,7 @@
  */
 
 import express from 'express';
+import { spawn } from 'child_process';
 import { PROJECT_DIR, FRONTEND_DIR } from '../../core/config.js';
 import { resolveSafePath, apiResponse, execAsync } from './helpers.js';
 import { restartVite } from '../../services/processes/vite.js';
@@ -146,6 +147,9 @@ router.post('/execute-bash', async (req, res) => {
  * Executes `bun run build` to create a production build in the dist/ folder.
  * Optionally supports development mode builds via `mode` parameter.
  *
+ * IMPORTANT: Build runs in background to prevent blocking the event loop.
+ * Returns immediately with status. Check logs for build completion.
+ *
  * @body {string} [mode='production'] - Build mode: 'production' or 'development'
  */
 router.post('/build', async (req, res) => {
@@ -158,74 +162,75 @@ router.post('/build', async (req, res) => {
     }
 
     console.log(`🔨 Building frontend (mode: ${mode})...`);
+
+    const buildScript = mode === 'development' ? 'build:dev' : 'build';
+
+    // Return immediately - build runs in background
+    apiResponse(res, 200, {
+      success: true,
+      message: 'Build started in background',
+      mode
+    });
+
+    // Run build in DETACHED background process (truly non-blocking)
+    // Use 'nice' (CPU priority) + 'ionice' (I/O priority) to prevent blocking Vite
     const startTime = Date.now();
 
-    const buildCommand = mode === 'development'
-      ? 'bun run build:dev'
-      : 'bun run build';
-
-    try {
-      const { stdout, stderr } = await execAsync(buildCommand, {
+    // Spawn detached process with low CPU and I/O priority
+    // ionice -c2 -n7 = best-effort I/O class, lowest priority (0=highest, 7=lowest)
+    const buildProcess = spawn(
+      'bash',
+      ['-c', `nice -n 19 ionice -c2 -n7 bun run ${buildScript}`],
+      {
         cwd: FRONTEND_DIR,
-        timeout: 180000, // 3 minutes for build
-        maxBuffer: 1024 * 1024 * 10,
+        detached: true,  // Run in separate process group
+        stdio: ['ignore', 'pipe', 'pipe'], // stdin=ignore, stdout/stderr=pipe (must consume!)
         env: {
           ...process.env,
           NODE_ENV: mode
         }
-      });
-
-      const duration = Date.now() - startTime;
-      console.log(`✅ Build completed in ${duration}ms`);
-
-      // Sync only dist folder to GCS (incremental - much faster!)
-      console.log('📤 Syncing dist folder to GCS...');
-      let syncResult = { success: 0, failed: 0, total: 0 };
-      let syncError = null;
-
-      try {
-        syncResult = await syncDirectoryToGCS(PROJECT_DIR, 'frontend/dist');
-        if (syncResult.failed === 0) {
-          console.log(`✅ Dist folder synced to GCS (${syncResult.success} files)`);
-        } else {
-          console.warn(`⚠️ Dist sync partial: ${syncResult.success}/${syncResult.total} files`);
-        }
-      } catch (syncErr) {
-        syncError = syncErr.message;
-        console.error('⚠️ GCS sync failed (build still succeeded):', syncErr.message);
       }
+    );
 
-      return apiResponse(res, 200, {
-        success: true,
-        mode,
-        duration,
-        stdout: stdout || '',
-        stderr: stderr || '',
-        message: `Frontend built successfully in ${(duration / 1000).toFixed(1)}s`,
-        gcsSync: {
-          filesUploaded: syncResult.success,
-          filesFailed: syncResult.failed,
-          totalFiles: syncResult.total,
-          error: syncError
-        }
-      });
-    } catch (execError) {
+    // 🔥 IMPORTANT: Consume streams to prevent blocking
+    // If we don't read from stdout/stderr, the child process will block when buffers fill
+    buildProcess.stdout.on('data', (data) => {
+      console.log(`[BUILD]: ${data.toString().trim()}`);
+    });
+
+    buildProcess.stderr.on('data', (data) => {
+      console.error(`[BUILD ERROR]: ${data.toString().trim()}`);
+    });
+
+    // Unref so parent process doesn't wait for child
+    buildProcess.unref();
+
+    // Log build start
+    console.log(`🚀 Build process spawned (PID: ${buildProcess.pid}) with low CPU (nice 19) and I/O (ionice c2 n7) priority`);
+
+    // Monitor build completion in background (lightweight logging only)
+    buildProcess.on('exit', (code) => {
       const duration = Date.now() - startTime;
-      const output = execError.stdout || '';
-      const errorOutput = execError.stderr || execError.message || '';
 
-      console.error(`❌ Build failed in ${duration}ms`);
+      if (code === 0) {
+        console.log(`✅ Build completed in ${duration}ms`);
 
-      return apiResponse(res, 200, {
-        success: false,
-        mode,
-        duration,
-        stdout: output,
-        stderr: errorOutput,
-        exitCode: execError.code || 1,
-        message: 'Build failed'
-      });
-    }
+        // Trigger GCS sync asynchronously (don't await - fire and forget)
+        console.log('📤 Syncing dist folder to GCS...');
+        syncDirectoryToGCS(PROJECT_DIR, 'frontend/dist')
+          .then(result => {
+            if (result.failed === 0) {
+              console.log(`✅ Dist folder synced to GCS (${result.success} files)`);
+            } else {
+              console.warn(`⚠️ Dist sync partial: ${result.success}/${result.total} files`);
+            }
+          })
+          .catch(err => console.error('⚠️ GCS sync failed:', err.message));
+      } else {
+        console.error(`❌ Build failed with exit code ${code} after ${duration}ms`);
+      }
+    });
+
   } catch (error) {
     console.error('Build error:', error);
     return apiResponse(res, 500, { error: error.message });

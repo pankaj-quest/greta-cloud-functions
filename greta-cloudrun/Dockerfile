@@ -2,13 +2,14 @@
 # Use Debian-based image for easier MongoDB installation
 FROM node:20-slim
 
-# Install useful tools + Python + MongoDB + Playwright dependencies + unzip (for Bun) + lz4 (fast decompression)
+# Install useful tools + Python + MongoDB + Playwright dependencies + unzip (for Bun) + lz4 (fast decompression) + util-linux (for ionice)
 RUN apt-get update && apt-get install -y \
     git \
     curl \
     gnupg \
     unzip \
     lz4 \
+    util-linux \
     python3 \
     python3-pip \
     python3-venv \
