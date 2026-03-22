@@ -15,7 +15,6 @@ import path from 'path';
 import { exec } from 'child_process';
 import { PROJECT_DIR, FRONTEND_DIR, BACKEND_DIR, projectId } from '../../core/config.js';
 import { syncToGCS } from '../../services/storage/gcs-sync.js';
-import { restartVite } from '../../services/processes/vite.js';
 import { ensureNodeModules, execAsync } from './helpers.js';
 
 const router = express.Router();
@@ -27,9 +26,9 @@ const router = express.Router();
 
 /**
  * POST /add-dependency - Install an NPM package in the frontend
- * 
+ *
  * Runs `bun add` in FRONTEND_DIR. Package is saved to package.json.
- * Restarts Vite after installation to ensure clean dependency resolution.
+ * Vite will auto-detect the new dependency via HMR (no restart needed).
  */
 router.post('/add-dependency', async (req, res) => {
   try {
@@ -47,9 +46,6 @@ router.post('/add-dependency', async (req, res) => {
 
     console.log(`✅ Installed package: ${packageName}`);
 
-    // Restart Vite to avoid multiple React copies issue
-    await restartVite();
-
     // Sync package.json to GCS for persistence
     console.log('💾 Syncing package.json to GCS for persistence...');
     await syncToGCS(PROJECT_DIR);
@@ -57,7 +53,7 @@ router.post('/add-dependency', async (req, res) => {
     res.json({
       success: true,
       package: packageName,
-      message: `Installed ${packageName} via bun. Vite restarted.`
+      message: `Installed ${packageName} via bun. Vite will auto-reload via HMR.`
     });
   } catch (error) {
     console.error(`❌ Failed to install package:`, error.message);
